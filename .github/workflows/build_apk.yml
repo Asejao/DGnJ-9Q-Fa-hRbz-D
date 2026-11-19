@@ -1,0 +1,80 @@
+﻿name: Build NIFix Android APK
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Private NIFix Repository
+        uses: actions/checkout@v4
+        with:
+          repository: Asejao/NIFix-android-iOS
+          token: ${{ secrets.GH_PAT }}
+          ref: main
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Configure Release Signing Keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "ERROR: ANDROID_KEYSTORE_BASE64 secret is not set!"
+            exit 1
+          fi
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/app/release-key.jks
+          keytool -list -keystore android/app/release-key.jks -storepass "$ANDROID_KEYSTORE_PASSWORD" -alias "$ANDROID_KEY_ALIAS"
+
+      - name: Build Universal Release APK
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          flutter build apk --release --android-skip-build-dependency-validation
+          cp build/app/outputs/flutter-apk/app-release.apk NIFix-universal.apk
+          keytool -printcert -jarfile NIFix-universal.apk | grep -E "Owner:|Issuer:|SHA1:|SHA256:" || true
+          rm -f android/app/release-key.jks
+
+      - name: Upload Android Universal APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NIFix-Android-Universal-APK
+          path: NIFix-universal.apk
+          retention-days: 5
+
+      - name: Push APK to NIFix-android-iOS ci-apk-tmp
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          STAGING_DIR=$(mktemp -d)
+          cp NIFix-universal.apk "$STAGING_DIR/NIFix-universal.apk"
+          cd "$STAGING_DIR"
+          git init -b ci-apk-tmp
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add NIFix-universal.apk
+          git commit -m "Build from DGnJ runner"
+          git remote add origin "https://x-access-token:${GH_PAT}@github.com/Asejao/NIFix-android-iOS.git"
+          git push --force origin ci-apk-tmp:refs/heads/ci-apk-tmp
